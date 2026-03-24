@@ -183,6 +183,69 @@ where
     }
 }
 
+use crate::whir::proof::BatchWhirProof;
+
+/// Parses batch commitment data from a `BatchWhirProof` during verification.
+///
+/// Reconstructs both `ParsedCommitment`s by replaying the transcript: observes
+/// both roots, then reconstructs OOD statements from the proof's stored answers.
+#[derive(Debug)]
+pub struct BatchCommitmentReader<'a, EF, F, MT: Mmcs<F>, Challenger>(
+    &'a WhirConfig<EF, F, MT, Challenger>,
+)
+where
+    F: Field,
+    EF: ExtensionField<F>;
+
+impl<EF, F, MT, Challenger> BatchCommitmentReader<'_, EF, F, MT, Challenger>
+where
+    F: TwoAdicField,
+    EF: ExtensionField<F> + TwoAdicField,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    MT: Mmcs<F>,
+{
+    pub const fn new(params: &WhirConfig<EF, F, MT, Challenger>) -> BatchCommitmentReader<'_, EF, F, MT, Challenger> {
+        BatchCommitmentReader(params)
+    }
+
+    /// Parse both commitments from a batch proof, replaying the transcript.
+    pub fn parse_batch_commitment(
+        &self,
+        proof: &BatchWhirProof<F, EF, MT>,
+        challenger: &mut Challenger,
+    ) -> (ParsedCommitment<EF, MT::Commitment>, ParsedCommitment<EF, MT::Commitment>)
+    where
+        Challenger: CanObserve<MT::Commitment>,
+    {
+        let num_variables = self.0.num_variables;
+
+        let root_a = proof.commitment_a.clone().unwrap();
+        let root_b = proof.commitment_b.clone().unwrap();
+        challenger.observe(root_a.clone());
+        challenger.observe(root_b.clone());
+
+        let mut ood_a = EqStatement::initialize(num_variables);
+        let mut ood_b = EqStatement::initialize(num_variables);
+        for i in 0..self.0.commitment_ood_samples {
+            let point = MultilinearPoint::expand_from_univariate(
+                challenger.sample_algebra_element(),
+                num_variables,
+            );
+            let eval_a = proof.initial_ood_answers[0][i];
+            let eval_b = proof.initial_ood_answers[1][i];
+            challenger.observe_algebra_element(eval_a);
+            challenger.observe_algebra_element(eval_b);
+            ood_a.add_evaluated_constraint(point.clone(), eval_a);
+            ood_b.add_evaluated_constraint(point, eval_b);
+        }
+
+        (
+            ParsedCommitment { root: root_a, ood_statement: ood_a },
+            ParsedCommitment { root: root_b, ood_statement: ood_b },
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;

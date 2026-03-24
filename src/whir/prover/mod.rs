@@ -21,8 +21,12 @@ use crate::{
     },
     fiat_shamir::errors::FiatShamirError,
     parameters::WhirConfig,
+    sumcheck::{extrapolate_012, product_polynomial::ProductPolynomial, prover::SumcheckProver},
     whir::{
-        proof::{QueryOpening, SumcheckData, WhirProof},
+        proof::{
+            BatchWhirProof, QueryOpening, SumcheckData, WhirProof, fold_ood_constraints,
+            single_constraint,
+        },
         utils::get_challenge_stir_queries,
     },
 };
@@ -470,6 +474,190 @@ where {
                 None,
             );
             proof.set_final_sumcheck_data(sumcheck_data);
+        }
+
+        Ok(())
+    }
+
+    /// Performs the selector sumcheck round for batch opening.
+    ///
+    /// This is a single round of sumcheck over the selector variable X, which
+    /// folds two polynomials f_a and f_b into a single polynomial g.
+    ///
+    /// Returns `(sumcheck_prover, r_0)` where:
+    /// - `sumcheck_prover` contains the folded polynomial g and weight w'
+    /// - `r_0` is the selector challenge from Fiat-Shamir
+    #[instrument(skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn selector_round(
+        &self,
+        selector_data: &mut SumcheckData<F, EF>,
+        challenger: &mut Challenger,
+        f_a: &EvaluationsList<F>,
+        f_b: &EvaluationsList<F>,
+        z_a: &MultilinearPoint<EF>,
+        z_b: &MultilinearPoint<EF>,
+        v_a: EF,
+        v_b: EF,
+        alpha: EF,
+    ) -> (SumcheckProver<F, EF>, EF) {
+        let n = f_a.num_variables();
+        debug_assert_eq!(n, f_b.num_variables());
+        debug_assert_eq!(n, z_a.num_variables());
+        debug_assert_eq!(n, z_b.num_variables());
+
+        // Build virtual combined polynomial: f_c = [f_b | f_a]
+        // X=0 half is f_b, X=1 half is f_a
+        let combined_evals: Vec<F> = f_b
+            .as_slice()
+            .iter()
+            .chain(f_a.as_slice().iter())
+            .copied()
+            .collect();
+        let combined_poly = EvaluationsList::new(combined_evals);
+
+        // Build combined weights: w = [α·eq(·, z_b) | eq(·, z_a)]
+        let eq_z_b = EvaluationsList::new_from_point(z_b.as_slice(), alpha);
+        let eq_z_a = EvaluationsList::new_from_point(z_a.as_slice(), EF::ONE);
+        let combined_weights: Vec<EF> = eq_z_b
+            .as_slice()
+            .iter()
+            .chain(eq_z_a.as_slice().iter())
+            .copied()
+            .collect();
+        let combined_weights = EvaluationsList::new(combined_weights);
+
+        // Compute sumcheck coefficients: h(X) = c0 + c1·X + c2·X²
+        let (c0, c2) = combined_poly.sumcheck_coefficients(&combined_weights);
+
+        // Sanity check: h(0) = sum_{x} f_b(x)·α·eq(x,z_b) = α·v_b
+        debug_assert_eq!(c0, alpha * v_b);
+
+        // Fiat-Shamir: commit (c0, c2) and receive challenge r_0
+        let r_0 = selector_data.observe_and_sample::<_, F>(
+            challenger,
+            c0,
+            c2,
+            self.starting_folding_pow_bits,
+        );
+
+        // Materialize g(x) = r_0·f_a(x) + (1-r_0)·f_b(x)
+        let one_minus_r0 = EF::ONE - r_0;
+        let g: Vec<EF> = f_a
+            .as_slice()
+            .iter()
+            .zip(f_b.as_slice().iter())
+            .map(|(&a, &b)| r_0 * EF::from(a) + one_minus_r0 * EF::from(b))
+            .collect();
+        let g = EvaluationsList::new(g);
+
+        // Materialize w'(x) = r_0·eq(x,z_a) + α·(1-r_0)·eq(x,z_b)
+        let w_prime: Vec<EF> = eq_z_a
+            .as_slice()
+            .iter()
+            .zip(eq_z_b.as_slice().iter())
+            .map(|(&a, &b)| r_0 * a + one_minus_r0 * b)
+            .collect();
+        let w_prime = EvaluationsList::new(w_prime);
+
+        // Compute folded sum: σ' = h(r_0) via quadratic extrapolation
+        let sigma = v_a + alpha * v_b;
+        let sigma_prime = extrapolate_012(c0, sigma - c0, c2, r_0);
+
+        // Create sumcheck prover for continuation
+        let poly = ProductPolynomial::new_small(g, w_prime);
+        debug_assert_eq!(poly.dot_product(), sigma_prime);
+
+        (
+            SumcheckProver {
+                poly,
+                sum: sigma_prime,
+            },
+            r_0,
+        )
+    }
+
+    /// Executes the batch opening proof protocol for two polynomials.
+    #[instrument(skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn batch_prove<Dft>(
+        &self,
+        dft: &Dft,
+        proof: &mut BatchWhirProof<F, EF, MT>,
+        challenger: &mut Challenger,
+        prover_data_a: MT::ProverData<DenseMatrix<F>>,
+        prover_data_b: MT::ProverData<DenseMatrix<F>>,
+        f_a: &EvaluationsList<F>,
+        f_b: &EvaluationsList<F>,
+        statement_a: &EqStatement<EF>,
+        statement_b: &EqStatement<EF>,
+        ood_statement_a: &EqStatement<EF>,
+        ood_statement_b: &EqStatement<EF>,
+    ) -> Result<(), FiatShamirError>
+    where
+        Dft: TwoAdicSubgroupDft<F>,
+        Challenger: CanObserve<MT::Commitment>,
+    {
+        let num_variables = f_a.num_variables();
+        assert_eq!(num_variables, f_b.num_variables());
+        assert!(self.validate_parameters());
+
+        // Extract single evaluation claims: f_a(z_a) = v_a, f_b(z_b) = v_b
+        let (z_a, v_a) = single_constraint(statement_a);
+        let (z_b, v_b) = single_constraint(statement_b);
+
+        // Sample batching randomness α
+        let alpha: EF = challenger.sample_algebra_element();
+
+        // Run selector sumcheck round
+        let (mut sumcheck_prover, r_0) = self.selector_round(
+            &mut proof.selector_sumcheck,
+            challenger,
+            f_a,
+            f_b,
+            &z_a,
+            &z_b,
+            v_a,
+            v_b,
+            alpha,
+        );
+
+        // Fold OOD constraints: ood_folded = r_0·ood_a + (1-r_0)·ood_b
+        let folded_ood = fold_ood_constraints(ood_statement_a, ood_statement_b, r_0);
+
+        // Combine folded OOD constraints into the sumcheck (same as initial round in single-poly)
+        let ood_constraint =
+            Constraint::new_eq_only(challenger.sample_algebra_element(), folded_ood);
+
+        // Run folding_factor rounds of sumcheck incorporating OOD constraints
+        let folding_factor = self.folding_factor.at_round(0);
+        let folding_randomness = sumcheck_prover.compute_sumcheck_polynomials(
+            &mut proof.inner_proof.initial_sumcheck,
+            challenger,
+            folding_factor,
+            self.starting_folding_pow_bits,
+            Some(ood_constraint),
+        );
+
+        // Initialize RoundState with BOTH commitment trees
+        let mut round_state = RoundState {
+            sumcheck_prover,
+            folding_randomness,
+            commitment_merkle_prover_data: prover_data_a,
+            merkle_prover_data: None,
+            batch_base_data: Some(prover_data_b),
+            batch_r0: Some(r_0),
+        };
+
+        // Run standard WHIR rounds
+        for round in 0..=self.n_rounds() {
+            self.round(
+                dft,
+                round,
+                &mut proof.inner_proof,
+                challenger,
+                &mut round_state,
+            )?;
         }
 
         Ok(())
