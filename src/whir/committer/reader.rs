@@ -204,7 +204,9 @@ where
     Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
     MT: Mmcs<F>,
 {
-    pub const fn new(params: &WhirConfig<EF, F, MT, Challenger>) -> BatchCommitmentReader<'_, EF, F, MT, Challenger> {
+    pub const fn new(
+        params: &WhirConfig<EF, F, MT, Challenger>,
+    ) -> BatchCommitmentReader<'_, EF, F, MT, Challenger> {
         BatchCommitmentReader(params)
     }
 
@@ -213,7 +215,10 @@ where
         &self,
         proof: &BatchWhirProof<F, EF, MT>,
         challenger: &mut Challenger,
-    ) -> (ParsedCommitment<EF, MT::Commitment>, ParsedCommitment<EF, MT::Commitment>)
+    ) -> (
+        ParsedCommitment<EF, MT::Commitment>,
+        ParsedCommitment<EF, MT::Commitment>,
+    )
     where
         Challenger: CanObserve<MT::Commitment>,
     {
@@ -240,8 +245,14 @@ where
         }
 
         (
-            ParsedCommitment { root: root_a, ood_statement: ood_a },
-            ParsedCommitment { root: root_b, ood_statement: ood_b },
+            ParsedCommitment {
+                root: root_a,
+                ood_statement: ood_a,
+            },
+            ParsedCommitment {
+                root: root_b,
+                ood_statement: ood_b,
+            },
         )
     }
 }

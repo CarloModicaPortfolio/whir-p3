@@ -5,7 +5,10 @@ use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::Mmcs;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, TwoAdicField};
-use p3_matrix::{Matrix, dense::{DenseMatrix, RowMajorMatrixView}};
+use p3_matrix::{
+    Matrix,
+    dense::{DenseMatrix, RowMajorMatrixView},
+};
 use p3_multilinear_util::{evals::EvaluationsList, multilinear::MultilinearPoint};
 use tracing::{info_span, instrument};
 

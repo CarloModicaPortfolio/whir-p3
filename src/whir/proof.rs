@@ -6,8 +6,8 @@ use p3_field::Field;
 use p3_multilinear_util::{evals::EvaluationsList, multilinear::MultilinearPoint};
 use serde::{Deserialize, Serialize};
 
-use crate::{constraints::statement::EqStatement, parameters::ProtocolParameters};
 pub use crate::sumcheck::SumcheckData;
+use crate::{constraints::statement::EqStatement, parameters::ProtocolParameters};
 
 /// Complete WHIR proof
 #[derive(Serialize, Deserialize, Clone, Debug)]

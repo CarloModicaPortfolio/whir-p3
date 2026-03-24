@@ -399,10 +399,7 @@ mod batch_tests {
         parameters::{FoldingFactor, ProtocolParameters, SecurityAssumption, WhirConfig},
         sumcheck::SumcheckData,
         whir::{
-            committer::{
-                reader::BatchCommitmentReader,
-                writer::BatchCommitmentWriter,
-            },
+            committer::{reader::BatchCommitmentReader, writer::BatchCommitmentWriter},
             proof::{BatchWhirProof, WhirProof},
             prover::Prover,
             verifier::Verifier,
@@ -534,13 +531,8 @@ mod batch_tests {
             ),
         };
 
-        let batch_data = batch_committer.commit(
-            &dft,
-            &mut proof,
-            &mut prover_challenger,
-            &poly_a,
-            &poly_b,
-        );
+        let batch_data =
+            batch_committer.commit(&dft, &mut proof, &mut prover_challenger, &poly_a, &poly_b);
 
         let prover = Prover(&params);
         prover
@@ -609,10 +601,7 @@ mod batch_tests {
         use std::time::Instant;
 
         use super::*;
-        use crate::{
-            parameters::SumcheckStrategy,
-            whir::committer::writer::CommitmentWriter,
-        };
+        use crate::{parameters::SumcheckStrategy, whir::committer::writer::CommitmentWriter};
 
         /// Run a single-polynomial commit + prove cycle. Returns elapsed time.
         #[allow(clippy::too_many_arguments)]
@@ -627,8 +616,7 @@ mod batch_tests {
         ) -> std::time::Duration {
             let mut statement = params.initial_statement(poly, SumcheckStrategy::default());
             for _ in 0..num_points {
-                let point =
-                    MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
+                let point = MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
                 let _ = statement.evaluate(&point);
             }
 
@@ -636,10 +624,8 @@ mod batch_tests {
             let mut challenger = MyChallenger::new(perm);
 
             let committer = CommitmentWriter::new(params);
-            let mut proof = WhirProof::<F, EF, MyMmcs>::from_protocol_parameters(
-                whir_params,
-                num_variables,
-            );
+            let mut proof =
+                WhirProof::<F, EF, MyMmcs>::from_protocol_parameters(whir_params, num_variables);
 
             let start = Instant::now();
 
@@ -666,10 +652,8 @@ mod batch_tests {
             num_variables: usize,
             rng: &mut SmallRng,
         ) -> std::time::Duration {
-            let z_a =
-                MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
-            let z_b =
-                MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
+            let z_a = MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
+            let z_b = MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
             let v_a: EF = poly_a.evaluate_hypercube_base(&z_a);
             let v_b: EF = poly_b.evaluate_hypercube_base(&z_b);
 
@@ -695,13 +679,8 @@ mod batch_tests {
 
             let start = Instant::now();
 
-            let batch_data = batch_committer.commit(
-                dft,
-                &mut proof,
-                &mut challenger,
-                poly_a,
-                poly_b,
-            );
+            let batch_data =
+                batch_committer.commit(dft, &mut proof, &mut challenger, poly_a, poly_b);
 
             let prover = Prover(params);
             prover
@@ -734,10 +713,8 @@ mod batch_tests {
             let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
 
             let num_evals = 1 << num_variables;
-            let poly_a =
-                EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
-            let poly_b =
-                EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
+            let poly_a = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
+            let poly_b = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
             let mut separate_total = std::time::Duration::ZERO;
             for _ in 0..ITERS {
                 let t1 = single_poly_prove(
@@ -806,10 +783,8 @@ mod batch_tests {
             let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
 
             let num_evals = 1 << num_variables;
-            let poly_a =
-                EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
-            let poly_b =
-                EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
+            let poly_a = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
+            let poly_b = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
 
             let mut separate_total = std::time::Duration::ZERO;
             for _ in 0..ITERS {

@@ -19,7 +19,9 @@ use crate::{
     },
     parameters::{RoundConfig, WhirConfig},
     sumcheck::verify_final_sumcheck_rounds,
-    whir::proof::{BatchWhirProof, QueryOpening, WhirProof, fold_ood_constraints, single_constraint},
+    whir::proof::{
+        BatchWhirProof, QueryOpening, WhirProof, fold_ood_constraints, single_constraint,
+    },
 };
 
 pub mod errors;
@@ -525,12 +527,9 @@ where
             constraint.combine_evals(&mut claimed_eval);
             constraints.push(constraint);
 
-            let folding_randomness =
-                proof.inner_proof.rounds[round_index].sumcheck.verify_rounds(
-                    challenger,
-                    &mut claimed_eval,
-                    round_params.folding_pow_bits,
-                )?;
+            let folding_randomness = proof.inner_proof.rounds[round_index]
+                .sumcheck
+                .verify_rounds(challenger, &mut claimed_eval, round_params.folding_pow_bits)?;
             round_folding_randomness.push(folding_randomness);
 
             prev_commitment = Some(new_commitment);
