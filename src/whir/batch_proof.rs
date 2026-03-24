@@ -318,8 +318,7 @@ mod tests {
     use p3_commit::Mmcs;
     use p3_dft::TwoAdicSubgroupDft;
     use p3_field::{Field, PrimeCharacteristicRing, extension::BinomialExtensionField};
-    use p3_matrix::Matrix;
-    use p3_matrix::dense::RowMajorMatrixView;
+    use p3_matrix::{Matrix, dense::RowMajorMatrixView};
     use p3_merkle_tree::MerkleTreeMmcs;
     use p3_multilinear_util::{evals::EvaluationsList, multilinear::MultilinearPoint};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
@@ -596,9 +595,10 @@ mod tests {
     }
 
     #[cfg(not(debug_assertions))]
-    use crate::{parameters::SumcheckStrategy, whir::committer::writer::CommitmentWriter};
-    #[cfg(not(debug_assertions))]
     use std::time::Instant;
+
+    #[cfg(not(debug_assertions))]
+    use crate::{parameters::SumcheckStrategy, whir::committer::writer::CommitmentWriter};
 
     /// Run a single-polynomial commit + prove cycle. Returns elapsed time.
     #[cfg(not(debug_assertions))]
