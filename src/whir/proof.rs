@@ -118,6 +118,18 @@ pub enum QueryOpening<F, EF, Proof> {
         /// Merkle authentication path
         proof: Proof,
     },
+    /// Batch opening: opens both polynomial trees at the same query index
+    #[serde(rename = "batch")]
+    Batch {
+        /// Merkle leaf values from first tree (f_a)
+        values_a: Vec<F>,
+        /// Merkle authentication path for first tree
+        proof_a: Proof,
+        /// Merkle leaf values from second tree (f_b)
+        values_b: Vec<F>,
+        /// Merkle authentication path for second tree
+        proof_b: Proof,
+    },
 }
 
 impl<F: Default + Send + Sync + Clone, EF: Default, MT: Mmcs<F>> WhirProof<F, EF, MT> {
@@ -432,7 +444,9 @@ mod tests {
                 assert_eq!(v[1], base_val_1);
                 assert_eq!(p.len(), 1);
             }
-            QueryOpening::Extension { .. } => panic!("Expected Base variant"),
+            QueryOpening::Extension { .. } | QueryOpening::Batch { .. } => {
+                panic!("Expected Base variant")
+            }
         }
 
         // Test Extension variant
@@ -461,7 +475,9 @@ mod tests {
                 assert_eq!(v[1], ext_val_1);
                 assert_eq!(p.len(), 1);
             }
-            QueryOpening::Base { .. } => panic!("Expected Extension variant"),
+            QueryOpening::Base { .. } | QueryOpening::Batch { .. } => {
+                panic!("Expected Extension variant")
+            }
         }
     }
 

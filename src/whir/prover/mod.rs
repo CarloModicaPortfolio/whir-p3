@@ -68,7 +68,7 @@ where
     ///
     /// # Returns
     /// `true` if the parameter configuration is consistent, `false` otherwise.
-    const fn validate_parameters(&self) -> bool {
+    pub(crate) const fn validate_parameters(&self) -> bool {
         self.0.num_variables
             == self.0.folding_factor.total_number(self.0.n_rounds()) + self.0.final_sumcheck_rounds
     }
@@ -130,7 +130,7 @@ where
     #[instrument(skip_all, fields(round_number = round_index, log_size = self.num_variables - self.folding_factor.total_number(round_index)))]
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::type_complexity)]
-    fn round<Dft: TwoAdicSubgroupDft<F>>(
+    pub(crate) fn round<Dft: TwoAdicSubgroupDft<F>>(
         &self,
         dft: &Dft,
         round_index: usize,
@@ -246,7 +246,49 @@ where
 
         // Collect Merkle proofs for stir queries
         match &round_state.merkle_prover_data {
+            None if round_state.batch_base_data.is_some() => {
+                // Batch mode: open BOTH commitment trees and fold values
+                let batch_data = round_state.batch_base_data.as_ref().unwrap();
+                let r_0 = round_state.batch_r0.unwrap();
+                let one_minus_r0 = EF::ONE - r_0;
+
+                let mut folded_answers: Vec<Vec<EF>> =
+                    Vec::with_capacity(stir_challenges_indexes.len());
+
+                for challenge in &stir_challenges_indexes {
+                    let commit_a = self
+                        .mmcs
+                        .open_batch(*challenge, &round_state.commitment_merkle_prover_data);
+                    let commit_b = self.mmcs.open_batch(*challenge, batch_data);
+
+                    let values_a = commit_a.opened_values[0].clone();
+                    let values_b = commit_b.opened_values[0].clone();
+
+                    // Fold opened values: g(b) = r_0·f_a(b) + (1-r_0)·f_b(b)
+                    let folded: Vec<EF> = values_a
+                        .iter()
+                        .zip(values_b.iter())
+                        .map(|(&a, &b)| r_0 * EF::from(a) + one_minus_r0 * EF::from(b))
+                        .collect();
+                    folded_answers.push(folded);
+
+                    queries.push(QueryOpening::Batch {
+                        values_a,
+                        proof_a: commit_a.opening_proof,
+                        values_b,
+                        proof_b: commit_b.opening_proof,
+                    });
+                }
+
+                // Process folded evaluations for STIR constraints
+                for (answer, var) in folded_answers.iter().zip(stir_vars.into_iter()) {
+                    let evals = EvaluationsList::new(answer.clone());
+                    let eval = evals.evaluate_hypercube_ext::<F>(&round_state.folding_randomness);
+                    stir_statement.add_constraint(var, eval);
+                }
+            }
             None => {
+                // Single-polynomial mode: open base commitment
                 let mut answers = Vec::with_capacity(stir_challenges_indexes.len());
                 for challenge in &stir_challenges_indexes {
                     let commitment = self
@@ -376,6 +418,23 @@ where {
 
         let extension_mmcs = ExtensionMmcs::new(self.mmcs.clone());
         match &round_state.merkle_prover_data {
+            None if round_state.batch_base_data.is_some() => {
+                // Batch mode: open both trees and store batch queries
+                let batch_data = round_state.batch_base_data.as_ref().unwrap();
+                for challenge in final_challenge_indexes {
+                    let commit_a = self
+                        .mmcs
+                        .open_batch(challenge, &round_state.commitment_merkle_prover_data);
+                    let commit_b = self.mmcs.open_batch(challenge, batch_data);
+
+                    proof.final_queries.push(QueryOpening::Batch {
+                        values_a: commit_a.opened_values[0].clone(),
+                        proof_a: commit_a.opening_proof,
+                        values_b: commit_b.opened_values[0].clone(),
+                        proof_b: commit_b.opening_proof,
+                    });
+                }
+            }
             None => {
                 for challenge in final_challenge_indexes {
                     let commitment = self

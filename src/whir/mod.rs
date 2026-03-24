@@ -1,3 +1,4 @@
+pub mod batch_proof;
 pub mod committer;
 pub mod proof;
 pub mod prover;

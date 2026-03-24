@@ -384,6 +384,14 @@ where
 
                     values.clone()
                 }
+                QueryOpening::Batch { .. } => {
+                    // Batch verification is not yet implemented.
+                    // The batch verifier will need separate root references for each tree.
+                    return Err(VerifierError::MerkleProofInvalid {
+                        position: index,
+                        reason: "Batch query verification not yet implemented".to_string(),
+                    });
+                }
             };
 
             results.push(values_ef);
