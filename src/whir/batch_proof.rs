@@ -49,6 +49,12 @@ use crate::{
     deserialize = "F: Deserialize<'de>, EF: Deserialize<'de>, MT::Commitment: Deserialize<'de>, MT::Proof: Deserialize<'de>"
 ))]
 pub struct BatchWhirProof<F: Send + Sync + Clone, EF, MT: Mmcs<F>> {
+    /// Commitment to first polynomial (f_a) — Merkle root
+    pub commitment_a: Option<MT::Commitment>,
+
+    /// Commitment to second polynomial (f_b) — Merkle root
+    pub commitment_b: Option<MT::Commitment>,
+
     /// OOD answers for both polynomials: [ood_a, ood_b]
     pub initial_ood_answers: [Vec<EF>; 2],
 
@@ -346,7 +352,10 @@ mod tests {
         dft: &Dft,
         poly: &EvaluationsList<F>,
         challenger: &mut MyChallenger,
-    ) -> <MyMmcs as Mmcs<F>>::ProverData<p3_matrix::dense::DenseMatrix<F>> {
+    ) -> (
+        <MyMmcs as Mmcs<F>>::Commitment,
+        <MyMmcs as Mmcs<F>>::ProverData<p3_matrix::dense::DenseMatrix<F>>,
+    ) {
         let num_vars = poly.num_variables();
         let mut mat = RowMajorMatrixView::new(
             poly.as_slice(),
@@ -360,8 +369,8 @@ mod tests {
 
         let folded_matrix = dft.dft_batch(mat).to_row_major_matrix();
         let (root, prover_data) = params.mmcs.commit_matrix(folded_matrix);
-        challenger.observe(root);
-        prover_data
+        challenger.observe(root.clone());
+        (root, prover_data)
     }
 
     /// Sample OOD points for both polynomials after both commitments are observed.
@@ -455,8 +464,8 @@ mod tests {
         let mut challenger = MyChallenger::new(perm);
 
         // Commit both polynomials (roots observed in transcript)
-        let prover_data_a = raw_commit(&params, &dft, &poly_a, &mut challenger);
-        let prover_data_b = raw_commit(&params, &dft, &poly_b, &mut challenger);
+        let (root_a, prover_data_a) = raw_commit(&params, &dft, &poly_a, &mut challenger);
+        let (root_b, prover_data_b) = raw_commit(&params, &dft, &poly_b, &mut challenger);
 
         // Sample OOD for both polynomials
         let (ood_a, ood_b, answers_a, answers_b) =
@@ -464,6 +473,8 @@ mod tests {
 
         // Create batch proof structure
         let mut proof = BatchWhirProof {
+            commitment_a: Some(root_a),
+            commitment_b: Some(root_b),
             initial_ood_answers: [answers_a, answers_b],
             selector_sumcheck: SumcheckData::default(),
             inner_proof: WhirProof::<F, EF, MyMmcs>::from_protocol_parameters(
@@ -666,13 +677,15 @@ mod tests {
 
         let start = Instant::now();
 
-        let prover_data_a = raw_commit(params, dft, poly_a, &mut challenger);
-        let prover_data_b = raw_commit(params, dft, poly_b, &mut challenger);
+        let (root_a, prover_data_a) = raw_commit(params, dft, poly_a, &mut challenger);
+        let (root_b, prover_data_b) = raw_commit(params, dft, poly_b, &mut challenger);
 
         let (ood_a, ood_b, answers_a, answers_b) =
             sample_batch_ood(params, &mut challenger, poly_a, poly_b, num_variables);
 
         let mut proof = BatchWhirProof {
+            commitment_a: Some(root_a),
+            commitment_b: Some(root_b),
             initial_ood_answers: [answers_a, answers_b],
             selector_sumcheck: SumcheckData::default(),
             inner_proof: WhirProof::<F, EF, MyMmcs>::from_protocol_parameters(
