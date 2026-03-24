@@ -14,28 +14,37 @@
 //! 5. The folded polynomial `g(x) = r_0·f_a(x) + (1-r_0)·f_b(x)` is
 //!    materialized and the standard WHIR protocol continues on `g`.
 
-use alloc::vec::Vec;
-use core::fmt;
+use alloc::{format, vec, vec::Vec};
+use core::{fmt, slice::from_ref};
 
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::Mmcs;
+use p3_commit::{BatchOpeningRef, Mmcs};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, TwoAdicField};
-use p3_matrix::dense::DenseMatrix;
+use p3_matrix::{Dimensions, dense::DenseMatrix};
 use p3_multilinear_util::{evals::EvaluationsList, multilinear::MultilinearPoint};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    constraints::{Constraint, statement::EqStatement},
+    alloc::string::ToString,
+    constraints::{
+        Constraint,
+        evaluator::ConstraintPolyEvaluator,
+        statement::{EqStatement, SelectStatement},
+    },
     fiat_shamir::errors::FiatShamirError,
+    parameters::RoundConfig,
     sumcheck::{
         SumcheckData, extrapolate_012, product_polynomial::ProductPolynomial,
-        prover::SumcheckProver,
+        prover::SumcheckProver, verify_final_sumcheck_rounds,
     },
     whir::{
-        proof::WhirProof,
+        committer::reader::ParsedCommitment,
+        proof::{QueryOpening, WhirProof},
         prover::{Prover, round_state::RoundState},
+        utils::get_challenge_stir_queries,
+        verifier::{Verifier, errors::VerifierError},
     },
 };
 
@@ -311,6 +320,369 @@ fn fold_ood_constraints<EF: Field>(
     }
 
     folded
+}
+
+impl<'a, EF, F, MT, Challenger> Verifier<'a, EF, F, MT, Challenger>
+where
+    F: TwoAdicField,
+    EF: ExtensionField<F> + TwoAdicField,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    MT: Mmcs<F>,
+{
+    /// Verifies a batch opening proof for two polynomials.
+    ///
+    /// Mirrors `Prover::batch_prove`:
+    /// 1. Replays the selector sumcheck to recover `r_0`.
+    /// 2. Folds OOD constraints with `r_0`.
+    /// 3. Verifies the inner WHIR proof on the folded polynomial.
+    ///
+    /// # Returns
+    ///
+    /// `(folding_randomness, r_0)` on success.
+    #[instrument(skip_all)]
+    #[allow(clippy::too_many_lines)]
+    pub fn batch_verify(
+        &self,
+        proof: &BatchWhirProof<F, EF, MT>,
+        challenger: &mut Challenger,
+        parsed_commitment_a: &ParsedCommitment<EF, MT::Commitment>,
+        parsed_commitment_b: &ParsedCommitment<EF, MT::Commitment>,
+        statement_a: EqStatement<EF>,
+        statement_b: EqStatement<EF>,
+    ) -> Result<(MultilinearPoint<EF>, EF), VerifierError>
+    where
+        Challenger: CanObserve<MT::Commitment>,
+    {
+        let (z_a, v_a) = single_constraint(&statement_a);
+        let (z_b, v_b) = single_constraint(&statement_b);
+
+        // Sample batching randomness α (same as prover)
+        let alpha: EF = challenger.sample_algebra_element();
+
+        // Selector sumcheck: claimed sum σ = v_a + α·v_b
+        let mut claimed_eval = v_a + alpha * v_b;
+
+        let selector_randomness = proof.selector_sumcheck.verify_rounds(
+            challenger,
+            &mut claimed_eval,
+            self.starting_folding_pow_bits,
+        )?;
+        debug_assert_eq!(selector_randomness.num_variables(), 1);
+        let r_0 = selector_randomness.as_slice()[0];
+
+        // Fold OOD constraints with r_0
+        let folded_ood = fold_ood_constraints(
+            &parsed_commitment_a.ood_statement,
+            &parsed_commitment_b.ood_statement,
+            r_0,
+        );
+
+        let mut constraints = Vec::new();
+        let mut round_folding_randomness = Vec::new();
+
+        let ood_constraint =
+            Constraint::new_eq_only(challenger.sample_algebra_element(), folded_ood);
+        ood_constraint.combine_evals(&mut claimed_eval);
+        constraints.push(ood_constraint);
+
+        let folding_randomness = proof.inner_proof.initial_sumcheck.verify_rounds(
+            challenger,
+            &mut claimed_eval,
+            self.starting_folding_pow_bits,
+        )?;
+        round_folding_randomness.push(folding_randomness);
+
+        // WHIR rounds
+        let mut prev_commitment: Option<ParsedCommitment<EF, MT::Commitment>> = None;
+
+        for round_index in 0..self.n_rounds() {
+            let round_params = &self.round_parameters[round_index];
+
+            let new_commitment = ParsedCommitment::<_, MT::Commitment>::parse_with_round(
+                &proof.inner_proof,
+                challenger,
+                round_params.num_variables,
+                round_params.ood_samples,
+                Some(round_index),
+            );
+
+            let stir_statement = if round_index == 0 {
+                self.verify_batch_stir_challenges(
+                    &proof.inner_proof,
+                    challenger,
+                    round_params,
+                    &parsed_commitment_a.root,
+                    &parsed_commitment_b.root,
+                    r_0,
+                    round_folding_randomness.last().unwrap(),
+                    round_index,
+                )?
+            } else {
+                self.verify_stir_challenges(
+                    &proof.inner_proof,
+                    challenger,
+                    round_params,
+                    prev_commitment.as_ref().unwrap(),
+                    round_folding_randomness.last().unwrap(),
+                    round_index,
+                )?
+            };
+
+            let constraint = Constraint::new(
+                challenger.sample_algebra_element(),
+                new_commitment.ood_statement.clone(),
+                stir_statement,
+            );
+            constraint.combine_evals(&mut claimed_eval);
+            constraints.push(constraint);
+
+            let folding_randomness =
+                proof.inner_proof.rounds[round_index].sumcheck.verify_rounds(
+                    challenger,
+                    &mut claimed_eval,
+                    round_params.folding_pow_bits,
+                )?;
+            round_folding_randomness.push(folding_randomness);
+
+            prev_commitment = Some(new_commitment);
+        }
+
+        // Final round
+        let Some(final_evaluations) = proof.inner_proof.final_poly.clone() else {
+            panic!("Expected final polynomial");
+        };
+        challenger.observe_algebra_slice(final_evaluations.as_slice());
+
+        let stir_statement = if self.n_rounds() == 0 {
+            self.verify_batch_stir_challenges(
+                &proof.inner_proof,
+                challenger,
+                &self.final_round_config(),
+                &parsed_commitment_a.root,
+                &parsed_commitment_b.root,
+                r_0,
+                round_folding_randomness.last().unwrap(),
+                self.n_rounds(),
+            )?
+        } else {
+            self.verify_stir_challenges(
+                &proof.inner_proof,
+                challenger,
+                &self.final_round_config(),
+                prev_commitment.as_ref().unwrap(),
+                round_folding_randomness.last().unwrap(),
+                self.n_rounds(),
+            )?
+        };
+
+        stir_statement
+            .verify(&final_evaluations)
+            .then_some(())
+            .ok_or_else(|| VerifierError::StirChallengeFailed {
+                challenge_id: 0,
+                details: "STIR constraint verification failed on final polynomial".to_string(),
+            })?;
+
+        let final_sumcheck_randomness = verify_final_sumcheck_rounds(
+            proof.inner_proof.final_sumcheck.as_ref(),
+            challenger,
+            &mut claimed_eval,
+            self.final_sumcheck_rounds,
+            self.final_folding_pow_bits,
+        )?;
+
+        round_folding_randomness.push(final_sumcheck_randomness.clone());
+
+        let folding_randomness = MultilinearPoint::new(
+            round_folding_randomness
+                .into_iter()
+                .flat_map(IntoIterator::into_iter)
+                .collect(),
+        );
+
+        let point_for_eval = folding_randomness.reversed();
+
+        let evaluation_of_constraint_weights = ConstraintPolyEvaluator::new(self.folding_factor)
+            .eval_constraints_poly(&constraints, &point_for_eval);
+
+        // The selector weight w'(x) = r_0·eq(x,z_a) + α·(1-r_0)·eq(x,z_b) is baked into
+        // the sumcheck prover's product polynomial but not captured as a Constraint.
+        // Evaluate it at the folding point and add to the constraint weights.
+        let selector_point = point_for_eval
+            .get_subpoint_over_range(0..self.num_variables)
+            .reversed();
+        let w_prime_eval = r_0 * z_a.eq_poly(&selector_point)
+            + alpha * (EF::ONE - r_0) * z_b.eq_poly(&selector_point);
+        let evaluation_of_weights = evaluation_of_constraint_weights + w_prime_eval;
+
+        let final_value = final_evaluations.evaluate_hypercube_ext::<F>(&final_sumcheck_randomness);
+        if claimed_eval != evaluation_of_weights * final_value {
+            return Err(VerifierError::SumcheckFailed {
+                round: self.final_sumcheck_rounds,
+                expected: (evaluation_of_weights * final_value).to_string(),
+                actual: claimed_eval.to_string(),
+            });
+        }
+
+        Ok((folding_randomness, r_0))
+    }
+
+    /// Verify STIR in-domain queries for batch opening.
+    ///
+    /// Opens and verifies Merkle proofs against two separate commitment trees
+    /// (f_a and f_b), then folds the opened values using `r_0`.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_batch_stir_challenges(
+        &self,
+        proof: &WhirProof<F, EF, MT>,
+        challenger: &mut Challenger,
+        params: &RoundConfig<F>,
+        root_a: &MT::Commitment,
+        root_b: &MT::Commitment,
+        r_0: EF,
+        folding_randomness: &MultilinearPoint<EF>,
+        round_index: usize,
+    ) -> Result<SelectStatement<F, EF>, VerifierError> {
+        let pow_witness = if round_index < self.n_rounds() {
+            proof
+                .get_pow_after_commitment(round_index)
+                .ok_or(VerifierError::InvalidRoundIndex { index: round_index })?
+        } else {
+            proof.final_pow_witness
+        };
+        if params.pow_bits > 0 && !challenger.check_witness(params.pow_bits, pow_witness) {
+            return Err(VerifierError::InvalidPowWitness);
+        }
+
+        if round_index < self.n_rounds() {
+            challenger.sample();
+        }
+
+        let stir_challenges_indexes = get_challenge_stir_queries::<Challenger, F, EF>(
+            params.domain_size,
+            params.folding_factor,
+            params.num_queries,
+            challenger,
+        )?;
+
+        let dimensions = vec![Dimensions {
+            height: params.domain_size >> params.folding_factor,
+            width: 1 << params.folding_factor,
+        }];
+
+        let queries = if round_index == self.n_rounds() {
+            &proof.final_queries
+        } else {
+            &proof
+                .rounds
+                .get(round_index)
+                .ok_or_else(|| VerifierError::MerkleProofInvalid {
+                    position: 0,
+                    reason: format!("Round {round_index} not found in proof"),
+                })?
+                .queries
+        };
+
+        let answers = self.verify_batch_merkle_proof(
+            root_a,
+            root_b,
+            r_0,
+            &stir_challenges_indexes,
+            &dimensions,
+            queries,
+        )?;
+
+        let folds: Vec<_> = answers
+            .into_iter()
+            .map(|answer| {
+                EvaluationsList::new(answer).evaluate_hypercube_ext::<F>(folding_randomness)
+            })
+            .collect();
+
+        let stir_constraints = stir_challenges_indexes
+            .iter()
+            .map(|&index| params.folded_domain_gen.exp_u64(index as u64))
+            .collect();
+
+        Ok(SelectStatement::new(
+            params.num_variables,
+            stir_constraints,
+            folds,
+        ))
+    }
+
+    /// Verify batch Merkle proofs for `QueryOpening::Batch` queries.
+    ///
+    /// For each query, verifies both trees' Merkle proofs and folds the opened
+    /// values: `g(b) = r_0·f_a(b) + (1-r_0)·f_b(b)`.
+    fn verify_batch_merkle_proof(
+        &self,
+        root_a: &MT::Commitment,
+        root_b: &MT::Commitment,
+        r_0: EF,
+        indices: &[usize],
+        dimensions: &[Dimensions],
+        queries: &[QueryOpening<F, EF, MT::Proof>],
+    ) -> Result<Vec<Vec<EF>>, VerifierError> {
+        let one_minus_r0 = EF::ONE - r_0;
+        let mut results = Vec::with_capacity(indices.len());
+
+        for (&index, query) in indices.iter().zip(queries.iter()) {
+            match query {
+                QueryOpening::Batch {
+                    values_a,
+                    proof_a,
+                    values_b,
+                    proof_b,
+                } => {
+                    self.mmcs
+                        .verify_batch(
+                            root_a,
+                            dimensions,
+                            index,
+                            BatchOpeningRef {
+                                opened_values: from_ref(values_a),
+                                opening_proof: proof_a,
+                            },
+                        )
+                        .map_err(|_| VerifierError::MerkleProofInvalid {
+                            position: index,
+                            reason: "Batch: tree A Merkle proof verification failed".to_string(),
+                        })?;
+
+                    self.mmcs
+                        .verify_batch(
+                            root_b,
+                            dimensions,
+                            index,
+                            BatchOpeningRef {
+                                opened_values: from_ref(values_b),
+                                opening_proof: proof_b,
+                            },
+                        )
+                        .map_err(|_| VerifierError::MerkleProofInvalid {
+                            position: index,
+                            reason: "Batch: tree B Merkle proof verification failed".to_string(),
+                        })?;
+
+                    let folded: Vec<EF> = values_a
+                        .iter()
+                        .zip(values_b.iter())
+                        .map(|(&a, &b)| r_0 * EF::from(a) + one_minus_r0 * EF::from(b))
+                        .collect();
+                    results.push(folded);
+                }
+                _ => {
+                    return Err(VerifierError::MerkleProofInvalid {
+                        position: index,
+                        reason: "Expected Batch query opening in batch mode".to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -603,6 +975,140 @@ mod tests {
         let (_, &folded_val) = folded.iter().next().unwrap();
         let expected = r_0 * v_a + (EF::ONE - r_0) * v_b;
         assert_eq!(folded_val, expected);
+    }
+
+    /// Run the full batch prove + verify flow and check transcript consistency.
+    fn run_batch_prove_verify(num_variables: usize, folding_factor: FoldingFactor) {
+        let (params, whir_params, mut rng) = make_batch_test_config(num_variables, folding_factor);
+        let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
+
+        let num_evals = 1 << num_variables;
+        let poly_a = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
+        let poly_b = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
+
+        let z_a = MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
+        let z_b = MultilinearPoint::expand_from_univariate(rng.random(), num_variables);
+        let v_a: EF = poly_a.evaluate_hypercube_base(&z_a);
+        let v_b: EF = poly_b.evaluate_hypercube_base(&z_b);
+
+        let mut statement_a = EqStatement::initialize(num_variables);
+        statement_a.add_evaluated_constraint(z_a, v_a);
+        let mut statement_b = EqStatement::initialize(num_variables);
+        statement_b.add_evaluated_constraint(z_b, v_b);
+
+        // Both challengers start from the same state
+        let perm = Perm::new_from_rng_128(&mut rng);
+        let base_challenger = MyChallenger::new(perm);
+        let mut prover_challenger = base_challenger.clone();
+        let mut verifier_challenger = base_challenger;
+
+        // --- Prover side ---
+        let (root_a, prover_data_a) = raw_commit(&params, &dft, &poly_a, &mut prover_challenger);
+        let (root_b, prover_data_b) = raw_commit(&params, &dft, &poly_b, &mut prover_challenger);
+
+        let (ood_a, ood_b, answers_a, answers_b) = sample_batch_ood(
+            &params,
+            &mut prover_challenger,
+            &poly_a,
+            &poly_b,
+            num_variables,
+        );
+
+        let mut proof = BatchWhirProof {
+            commitment_a: Some(root_a),
+            commitment_b: Some(root_b),
+            initial_ood_answers: [answers_a.clone(), answers_b.clone()],
+            selector_sumcheck: SumcheckData::default(),
+            inner_proof: WhirProof::<F, EF, MyMmcs>::from_protocol_parameters(
+                &whir_params,
+                num_variables,
+            ),
+        };
+
+        let prover = Prover(&params);
+        prover
+            .batch_prove(
+                &dft,
+                &mut proof,
+                &mut prover_challenger,
+                prover_data_a,
+                prover_data_b,
+                &poly_a,
+                &poly_b,
+                &statement_a,
+                &statement_b,
+                &ood_a,
+                &ood_b,
+            )
+            .unwrap();
+
+        let checkpoint_prover: EF = prover_challenger.sample_algebra_element();
+
+        // Verifier side: replay commitment + OOD observations in the same order
+        // as the prover: root_a, root_b, then interleaved (point, eval_a, eval_b).
+        let root_a = proof.commitment_a.clone().unwrap();
+        let root_b = proof.commitment_b.clone().unwrap();
+        verifier_challenger.observe(root_a.clone());
+        verifier_challenger.observe(root_b.clone());
+
+        let mut ood_a = EqStatement::initialize(num_variables);
+        let mut ood_b = EqStatement::initialize(num_variables);
+        for i in 0..params.commitment_ood_samples {
+            let point = MultilinearPoint::expand_from_univariate(
+                verifier_challenger.sample_algebra_element(),
+                num_variables,
+            );
+            let eval_a = proof.initial_ood_answers[0][i];
+            let eval_b = proof.initial_ood_answers[1][i];
+            verifier_challenger.observe_algebra_element(eval_a);
+            verifier_challenger.observe_algebra_element(eval_b);
+            ood_a.add_evaluated_constraint(point.clone(), eval_a);
+            ood_b.add_evaluated_constraint(point, eval_b);
+        }
+
+        let parsed_a = ParsedCommitment {
+            root: root_a,
+            ood_statement: ood_a,
+        };
+        let parsed_b = ParsedCommitment {
+            root: root_b,
+            ood_statement: ood_b,
+        };
+
+        let verifier = Verifier::new(&params);
+        let (_folding_randomness, _r_0) = verifier
+            .batch_verify(
+                &proof,
+                &mut verifier_challenger,
+                &parsed_a,
+                &parsed_b,
+                statement_a,
+                statement_b,
+            )
+            .unwrap();
+
+        let checkpoint_verifier: EF = verifier_challenger.sample_algebra_element();
+        assert_eq!(checkpoint_prover, checkpoint_verifier);
+    }
+
+    #[test]
+    fn test_batch_prove_verify_folding_4() {
+        run_batch_prove_verify(10, FoldingFactor::Constant(4));
+    }
+
+    #[test]
+    fn test_batch_prove_verify_folding_2() {
+        run_batch_prove_verify(8, FoldingFactor::Constant(2));
+    }
+
+    #[test]
+    fn test_batch_prove_verify_folding_3() {
+        run_batch_prove_verify(9, FoldingFactor::Constant(3));
+    }
+
+    #[test]
+    fn test_batch_prove_verify_mixed_folding() {
+        run_batch_prove_verify(10, FoldingFactor::ConstantFromSecondRound(4, 2));
     }
 
     #[cfg(not(debug_assertions))]
