@@ -29,7 +29,10 @@ use tracing::instrument;
 use crate::{
     constraints::{Constraint, statement::EqStatement},
     fiat_shamir::errors::FiatShamirError,
-    sumcheck::{SumcheckData, extrapolate_012, product_polynomial::ProductPolynomial, prover::SumcheckProver},
+    sumcheck::{
+        SumcheckData, extrapolate_012, product_polynomial::ProductPolynomial,
+        prover::SumcheckProver,
+    },
     whir::{
         proof::WhirProof,
         prover::{Prover, round_state::RoundState},
@@ -124,7 +127,12 @@ where
         debug_assert_eq!(c0, alpha * v_b);
 
         // Fiat-Shamir: commit (c0, c2) and receive challenge r_0
-        let r_0 = selector_data.observe_and_sample::<_, F>(challenger, c0, c2, self.starting_folding_pow_bits);
+        let r_0 = selector_data.observe_and_sample::<_, F>(
+            challenger,
+            c0,
+            c2,
+            self.starting_folding_pow_bits,
+        );
 
         // Materialize g(x) = r_0·f_a(x) + (1-r_0)·f_b(x)
         let one_minus_r0 = EF::ONE - r_0;
@@ -153,7 +161,13 @@ where
         let poly = ProductPolynomial::new_small(g, w_prime);
         debug_assert_eq!(poly.dot_product(), sigma_prime);
 
-        (SumcheckProver { poly, sum: sigma_prime }, r_0)
+        (
+            SumcheckProver {
+                poly,
+                sum: sigma_prime,
+            },
+            r_0,
+        )
     }
 
     /// Executes the batch opening proof protocol for two polynomials.
@@ -244,7 +258,13 @@ where
 
         // Run standard WHIR rounds
         for round in 0..=self.n_rounds() {
-            self.round(dft, round, &mut proof.inner_proof, challenger, &mut round_state)?;
+            self.round(
+                dft,
+                round,
+                &mut proof.inner_proof,
+                challenger,
+                &mut round_state,
+            )?;
         }
 
         Ok(())
@@ -390,11 +410,7 @@ mod tests {
     ) {
         let mut rng = SmallRng::seed_from_u64(42);
         let perm = Perm::new_from_rng_128(&mut rng);
-        let mmcs = MyMmcs::new(
-            MyHash::new(perm.clone()),
-            MyCompress::new(perm),
-            0,
-        );
+        let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
 
         let whir_params = ProtocolParameters {
             security_level: 32,
@@ -406,10 +422,8 @@ mod tests {
             starting_log_inv_rate: 1,
         };
 
-        let params = WhirConfig::<EF, F, MyMmcs, MyChallenger>::new(
-            num_variables,
-            whir_params.clone(),
-        );
+        let params =
+            WhirConfig::<EF, F, MyMmcs, MyChallenger>::new(num_variables, whir_params.clone());
 
         (params, whir_params, rng)
     }
@@ -540,8 +554,8 @@ mod tests {
         let g = sumcheck_prover.evals();
         let one_minus_r0 = EF::ONE - r_0;
         for i in 0..num_evals {
-            let expected =
-                r_0 * EF::from(poly_a.as_slice()[i]) + one_minus_r0 * EF::from(poly_b.as_slice()[i]);
+            let expected = r_0 * EF::from(poly_a.as_slice()[i])
+                + one_minus_r0 * EF::from(poly_b.as_slice()[i]);
             assert_eq!(g.as_slice()[i], expected, "g mismatch at index {i}");
         }
 
@@ -582,12 +596,9 @@ mod tests {
     }
 
     #[cfg(not(debug_assertions))]
-    use std::time::Instant;
+    use crate::{parameters::SumcheckStrategy, whir::committer::writer::CommitmentWriter};
     #[cfg(not(debug_assertions))]
-    use crate::{
-        parameters::SumcheckStrategy,
-        whir::committer::writer::CommitmentWriter,
-    };
+    use std::time::Instant;
 
     /// Run a single-polynomial commit + prove cycle. Returns elapsed time.
     #[cfg(not(debug_assertions))]
@@ -698,8 +709,7 @@ mod tests {
 
         let num_variables = 16;
         let folding_factor = FoldingFactor::Constant(4);
-        let (params, whir_params, mut rng) =
-            make_batch_test_config(num_variables, folding_factor);
+        let (params, whir_params, mut rng) = make_batch_test_config(num_variables, folding_factor);
         let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
 
         let num_evals = 1 << num_variables;
@@ -709,10 +719,22 @@ mod tests {
         // Warmup
         for _ in 0..WARMUP {
             single_poly_prove(
-                &params, &whir_params, &dft, poly_a.clone(), num_variables, 1, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                poly_a.clone(),
+                num_variables,
+                1,
+                &mut rng,
             );
             batch_poly_prove(
-                &params, &whir_params, &dft, &poly_a, &poly_b, num_variables, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                &poly_a,
+                &poly_b,
+                num_variables,
+                &mut rng,
             );
         }
 
@@ -720,10 +742,22 @@ mod tests {
         let mut separate_total = std::time::Duration::ZERO;
         for _ in 0..ITERS {
             let t1 = single_poly_prove(
-                &params, &whir_params, &dft, poly_a.clone(), num_variables, 1, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                poly_a.clone(),
+                num_variables,
+                1,
+                &mut rng,
             );
             let t2 = single_poly_prove(
-                &params, &whir_params, &dft, poly_b.clone(), num_variables, 1, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                poly_b.clone(),
+                num_variables,
+                1,
+                &mut rng,
             );
             separate_total += t1 + t2;
         }
@@ -732,7 +766,13 @@ mod tests {
         let mut batch_total = std::time::Duration::ZERO;
         for _ in 0..ITERS {
             let t = batch_poly_prove(
-                &params, &whir_params, &dft, &poly_a, &poly_b, num_variables, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                &poly_a,
+                &poly_b,
+                num_variables,
+                &mut rng,
             );
             batch_total += t;
         }
@@ -742,7 +782,9 @@ mod tests {
         let speedup = separate_avg.as_secs_f64() / batch_avg.as_secs_f64();
 
         std::eprintln!();
-        std::eprintln!("=== Batch vs Separate Performance ({num_variables} variables, {ITERS} iterations) ===");
+        std::eprintln!(
+            "=== Batch vs Separate Performance ({num_variables} variables, {ITERS} iterations) ==="
+        );
         std::eprintln!("  Two separate proofs: {separate_avg:?} avg");
         std::eprintln!("  One batch proof:     {batch_avg:?} avg");
         std::eprintln!("  Speedup:             {speedup:.2}x");
@@ -766,8 +808,7 @@ mod tests {
 
         let num_variables = 20;
         let folding_factor = FoldingFactor::Constant(4);
-        let (params, whir_params, mut rng) =
-            make_batch_test_config(num_variables, folding_factor);
+        let (params, whir_params, mut rng) = make_batch_test_config(num_variables, folding_factor);
         let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
 
         let num_evals = 1 << num_variables;
@@ -776,17 +817,35 @@ mod tests {
 
         for _ in 0..WARMUP {
             single_poly_prove(
-                &params, &whir_params, &dft, poly_a.clone(), num_variables, 1, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                poly_a.clone(),
+                num_variables,
+                1,
+                &mut rng,
             );
         }
 
         let mut separate_total = std::time::Duration::ZERO;
         for _ in 0..ITERS {
             let t1 = single_poly_prove(
-                &params, &whir_params, &dft, poly_a.clone(), num_variables, 1, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                poly_a.clone(),
+                num_variables,
+                1,
+                &mut rng,
             );
             let t2 = single_poly_prove(
-                &params, &whir_params, &dft, poly_b.clone(), num_variables, 1, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                poly_b.clone(),
+                num_variables,
+                1,
+                &mut rng,
             );
             separate_total += t1 + t2;
         }
@@ -794,7 +853,13 @@ mod tests {
         let mut batch_total = std::time::Duration::ZERO;
         for _ in 0..ITERS {
             let t = batch_poly_prove(
-                &params, &whir_params, &dft, &poly_a, &poly_b, num_variables, &mut rng,
+                &params,
+                &whir_params,
+                &dft,
+                &poly_a,
+                &poly_b,
+                num_variables,
+                &mut rng,
             );
             batch_total += t;
         }
@@ -804,7 +869,9 @@ mod tests {
         let speedup = separate_avg.as_secs_f64() / batch_avg.as_secs_f64();
 
         std::eprintln!();
-        std::eprintln!("=== Batch vs Separate Performance ({num_variables} variables, {ITERS} iterations) ===");
+        std::eprintln!(
+            "=== Batch vs Separate Performance ({num_variables} variables, {ITERS} iterations) ==="
+        );
         std::eprintln!("  Two separate proofs: {separate_avg:?} avg");
         std::eprintln!("  One batch proof:     {batch_avg:?} avg");
         std::eprintln!("  Speedup:             {speedup:.2}x");
