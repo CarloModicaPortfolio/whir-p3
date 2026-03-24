@@ -1223,7 +1223,6 @@ mod tests {
     #[test]
     #[cfg(not(debug_assertions))]
     fn test_batch_vs_separate_performance() {
-        const WARMUP: usize = 2;
         const ITERS: usize = 5;
 
         let num_variables = 16;
@@ -1234,30 +1233,6 @@ mod tests {
         let num_evals = 1 << num_variables;
         let poly_a = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
         let poly_b = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
-
-        // Warmup
-        for _ in 0..WARMUP {
-            single_poly_prove(
-                &params,
-                &whir_params,
-                &dft,
-                poly_a.clone(),
-                num_variables,
-                1,
-                &mut rng,
-            );
-            batch_poly_prove(
-                &params,
-                &whir_params,
-                &dft,
-                &poly_a,
-                &poly_b,
-                num_variables,
-                &mut rng,
-            );
-        }
-
-        // Benchmark: two separate proofs
         let mut separate_total = std::time::Duration::ZERO;
         for _ in 0..ITERS {
             let t1 = single_poly_prove(
@@ -1310,9 +1285,6 @@ mod tests {
         std::eprintln!();
 
         // The batch proof should be faster than two separate proofs.
-        // At minimum it should be faster than 2x (since it avoids one full
-        // protocol execution), but even ~1.1x would show the optimization works.
-        // We use a lenient threshold since this runs in debug mode.
         assert!(
             batch_avg < separate_avg,
             "Batch proof ({batch_avg:?}) should be faster than two separate proofs ({separate_avg:?})"
@@ -1322,7 +1294,6 @@ mod tests {
     #[test]
     #[cfg(not(debug_assertions))]
     fn test_batch_vs_separate_performance_large() {
-        const WARMUP: usize = 1;
         const ITERS: usize = 3;
 
         let num_variables = 20;
@@ -1333,18 +1304,6 @@ mod tests {
         let num_evals = 1 << num_variables;
         let poly_a = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
         let poly_b = EvaluationsList::new((0..num_evals).map(|_| rng.random()).collect());
-
-        for _ in 0..WARMUP {
-            single_poly_prove(
-                &params,
-                &whir_params,
-                &dft,
-                poly_a.clone(),
-                num_variables,
-                1,
-                &mut rng,
-            );
-        }
 
         let mut separate_total = std::time::Duration::ZERO;
         for _ in 0..ITERS {
