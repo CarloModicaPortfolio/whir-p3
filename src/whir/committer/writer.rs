@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use core::ops::Deref;
 
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
@@ -141,8 +140,6 @@ pub struct BatchCommitmentData<EF, F: Send + Sync + Clone, MT: Mmcs<F>> {
     pub prover_data_b: MT::ProverData<DenseMatrix<F>>,
     pub ood_statement_a: EqStatement<EF>,
     pub ood_statement_b: EqStatement<EF>,
-    pub ood_answers_a: Vec<EF>,
-    pub ood_answers_b: Vec<EF>,
 }
 
 impl<'a, EF, F, MT, Challenger> BatchCommitmentWriter<'a, EF, F, MT, Challenger>
@@ -182,18 +179,14 @@ where
         proof.commitment_a = Some(root_a);
         proof.commitment_b = Some(root_b);
 
-        let (ood_statement_a, ood_statement_b, ood_answers_a, ood_answers_b) =
-            self.sample_batch_ood(challenger, poly_a, poly_b, num_variables);
-
-        proof.initial_ood_answers = [ood_answers_a.clone(), ood_answers_b.clone()];
+        let (ood_statement_a, ood_statement_b) =
+            self.sample_batch_ood(challenger, proof, poly_a, poly_b, num_variables);
 
         BatchCommitmentData {
             prover_data_a,
             prover_data_b,
             ood_statement_a,
             ood_statement_b,
-            ood_answers_a,
-            ood_answers_b,
         }
     }
 
@@ -229,14 +222,13 @@ where
     fn sample_batch_ood(
         &self,
         challenger: &mut Challenger,
+        proof: &mut BatchWhirProof<F, EF, MT>,
         poly_a: &EvaluationsList<F>,
         poly_b: &EvaluationsList<F>,
         num_variables: usize,
-    ) -> (EqStatement<EF>, EqStatement<EF>, Vec<EF>, Vec<EF>) {
+    ) -> (EqStatement<EF>, EqStatement<EF>) {
         let mut ood_a = EqStatement::initialize(num_variables);
         let mut ood_b = EqStatement::initialize(num_variables);
-        let mut answers_a = Vec::new();
-        let mut answers_b = Vec::new();
 
         for _ in 0..self.0.commitment_ood_samples {
             let point = MultilinearPoint::expand_from_univariate(
@@ -248,13 +240,13 @@ where
             challenger.observe_algebra_element(eval_a);
             challenger.observe_algebra_element(eval_b);
 
-            answers_a.push(eval_a);
-            answers_b.push(eval_b);
+            proof.initial_ood_answers[0].push(eval_a);
+            proof.initial_ood_answers[1].push(eval_b);
             ood_a.add_evaluated_constraint(point.clone(), eval_a);
             ood_b.add_evaluated_constraint(point, eval_b);
         }
 
-        (ood_a, ood_b, answers_a, answers_b)
+        (ood_a, ood_b)
     }
 }
 
