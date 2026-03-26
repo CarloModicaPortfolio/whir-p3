@@ -68,19 +68,23 @@ where
     /// preserving the Reed-Solomon proximity properties necessary for soundness.
     pub merkle_prover_data: Option<ExtData>,
 
-    /// Second base commitment for batch opening mode (f_b's tree).
+    /// Batch opening data for the first WHIR round.
     ///
-    /// When present, STIR queries on the initial commitment open both trees
-    /// and fold the values: g(b) = r_0·f_a(b) + (1-r_0)·f_b(b).
-    /// Only used for the first WHIR round; subsequent rounds use a single
+    /// When present, STIR queries open both commitment trees and fold values:
+    /// g(b) = r_0·f_a(b) + (1-r_0)·f_b(b).
+    /// Only used for the first round; subsequent rounds use a single
     /// extension field commitment.
-    pub batch_base_data: Option<BaseData>,
+    pub batch_data: Option<BatchRoundData<EF, BaseData>>,
+}
 
+/// Groups the second commitment tree and selector challenge for batch opening.
+#[derive(Debug)]
+pub struct BatchRoundData<EF, BaseData> {
+    /// Merkle prover data for the second polynomial (f_b's tree).
+    pub base_data: BaseData,
     /// Selector variable challenge from the batch opening's selector sumcheck round.
-    ///
-    /// Used to fold opened values from two commitment trees during STIR queries:
-    /// g(b) = batch_r0·f_a(b) + (1-batch_r0)·f_b(b).
-    pub batch_r0: Option<EF>,
+    /// Used to fold: g(b) = r_0·f_a(b) + (1-r_0)·f_b(b).
+    pub r_0: EF,
 }
 
 #[allow(clippy::mismatching_type_param_order)]
@@ -133,8 +137,7 @@ where
             // No extension field commitment yet (first round operates in base field)
             merkle_prover_data: None,
             // No batch data in single-polynomial mode
-            batch_base_data: None,
-            batch_r0: None,
+            batch_data: None,
         })
     }
 }

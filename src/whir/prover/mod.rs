@@ -11,7 +11,7 @@ use p3_matrix::{
     extension::FlatMatrixView,
 };
 use p3_multilinear_util::{evals::EvaluationsList, multilinear::MultilinearPoint};
-use round_state::RoundState;
+use round_state::{BatchRoundData, RoundState};
 use tracing::{info_span, instrument};
 
 use crate::{
@@ -250,11 +250,10 @@ where
 
         // Collect Merkle proofs for stir queries
         match &round_state.merkle_prover_data {
-            None if round_state.batch_base_data.is_some() => {
+            None if round_state.batch_data.is_some() => {
                 // Batch mode: open BOTH commitment trees and fold values
-                let batch_data = round_state.batch_base_data.as_ref().unwrap();
-                let r_0 = round_state.batch_r0.unwrap();
-                let one_minus_r0 = EF::ONE - r_0;
+                let batch = round_state.batch_data.as_ref().unwrap();
+                let one_minus_r0 = EF::ONE - batch.r_0;
 
                 let mut folded_answers: Vec<Vec<EF>> =
                     Vec::with_capacity(stir_challenges_indexes.len());
@@ -263,7 +262,7 @@ where
                     let commit_a = self
                         .mmcs
                         .open_batch(*challenge, &round_state.commitment_merkle_prover_data);
-                    let commit_b = self.mmcs.open_batch(*challenge, batch_data);
+                    let commit_b = self.mmcs.open_batch(*challenge, &batch.base_data);
 
                     let values_a = commit_a.opened_values[0].clone();
                     let values_b = commit_b.opened_values[0].clone();
@@ -272,7 +271,7 @@ where
                     let folded: Vec<EF> = values_a
                         .iter()
                         .zip(values_b.iter())
-                        .map(|(&a, &b)| r_0 * EF::from(a) + one_minus_r0 * EF::from(b))
+                        .map(|(&a, &b)| batch.r_0 * EF::from(a) + one_minus_r0 * EF::from(b))
                         .collect();
                     folded_answers.push(folded);
 
@@ -422,14 +421,14 @@ where {
 
         let extension_mmcs = ExtensionMmcs::new(self.mmcs.clone());
         match &round_state.merkle_prover_data {
-            None if round_state.batch_base_data.is_some() => {
+            None if round_state.batch_data.is_some() => {
                 // Batch mode: open both trees and store batch queries
-                let batch_data = round_state.batch_base_data.as_ref().unwrap();
+                let batch = round_state.batch_data.as_ref().unwrap();
                 for challenge in final_challenge_indexes {
                     let commit_a = self
                         .mmcs
                         .open_batch(challenge, &round_state.commitment_merkle_prover_data);
-                    let commit_b = self.mmcs.open_batch(challenge, batch_data);
+                    let commit_b = self.mmcs.open_batch(challenge, &batch.base_data);
 
                     proof.final_queries.push(QueryOpening::Batch {
                         values_a: commit_a.opened_values[0].clone(),
@@ -645,8 +644,10 @@ where {
             folding_randomness,
             commitment_merkle_prover_data: prover_data_a,
             merkle_prover_data: None,
-            batch_base_data: Some(prover_data_b),
-            batch_r0: Some(r_0),
+            batch_data: Some(BatchRoundData {
+                base_data: prover_data_b,
+                r_0,
+            }),
         };
 
         // Run standard WHIR rounds
