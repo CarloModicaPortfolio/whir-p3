@@ -5,7 +5,11 @@ use p3_commit::Mmcs;
 use p3_field::{ExtensionField, Field, PackedValue, TwoAdicField};
 use p3_multilinear_util::multilinear::MultilinearPoint;
 
-use crate::{constraints::statement::EqStatement, parameters::WhirConfig, whir::proof::WhirProof};
+use crate::{
+    constraints::statement::EqStatement,
+    parameters::WhirConfig,
+    whir::proof::{BatchWhirProof, WhirProof},
+};
 
 /// Represents a parsed commitment from the prover in the WHIR protocol.
 ///
@@ -182,8 +186,6 @@ where
         self.0
     }
 }
-
-use crate::whir::proof::BatchWhirProof;
 
 /// Parses batch commitment data from a `BatchWhirProof` during verification.
 ///
